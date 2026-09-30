@@ -7,6 +7,9 @@ type HL = 'A0' | 'eps' | 'k' | 'thr' | null;
 
 interface Metrics { t: number; hmax: number; peak: number; }
 
+/** Зафиксированная волна-убийца: эпизод превышения порога AI. */
+interface RogueRecord { id: number; t0: number; t: number; hmax: number; ai: number; }
+
 const f = (v: number, d = 2) => v.toFixed(d);
 
 const STEPS_PER_FRAME = 8;
@@ -56,11 +59,14 @@ export function App() {
   const [hl, setHl] = useState<HL>(null);
   const [frame, setFrame] = useState(0);
   const [m, setM] = useState<Metrics>({ t: 0, hmax: 0, peak: 0 });
+  const [records, setRecords] = useState<RogueRecord[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const simRef = useRef<Sim | null>(null);
   const peakRef = useRef(0);
   const accRef = useRef(0);
+  const inRogueRef = useRef(false);
+  const recIdRef = useRef(0);
   const live = useRef({ A0, thr, speed });
   live.current = { A0, thr, speed };
 
@@ -76,12 +82,34 @@ export function App() {
     const hmax = sim.maxAmp();
     peakRef.current = Math.max(peakRef.current, hmax);
     setM({ t: sim.t, hmax, peak: peakRef.current });
+
+    const { A0, thr } = live.current;
+    const ai = hmax / A0;
+    if (ai >= thr) {
+      const t = sim.t;
+      if (!inRogueRef.current) {
+        inRogueRef.current = true;
+        const id = recIdRef.current++;
+        setRecords((rs) => [...rs, { id, t0: t, t, hmax, ai }]);
+      } else {
+        // эпизод продолжается: держим в записи максимум
+        setRecords((rs) => {
+          const last = rs[rs.length - 1];
+          if (!last || hmax <= last.hmax) return rs;
+          return [...rs.slice(0, -1), { ...last, t, hmax, ai }];
+        });
+      }
+    } else {
+      inRogueRef.current = false;
+    }
   }, []);
 
   const reset = useCallback(() => {
     simRef.current = initPerturbed(A0, eps, k);
     peakRef.current = 0;
     accRef.current = 0;
+    inRogueRef.current = false;
+    setRecords([]);
     setFrame(0);
     setPlaying(false);
     sync();
@@ -89,7 +117,13 @@ export function App() {
   }, [A0, eps, k, sync, redraw]);
 
   useEffect(() => { reset(); }, [reset]);
-  useEffect(() => { redraw(); }, [thr, redraw]);
+  useEffect(() => {
+    // записи зависят от порога — при его смене сбрасываем и пересчитываем текущий кадр
+    inRogueRef.current = false;
+    setRecords([]);
+    if (simRef.current) sync();
+    redraw();
+  }, [thr, sync, redraw]);
   useEffect(() => {
     const onResize = () => redraw();
     window.addEventListener('resize', onResize);
@@ -118,6 +152,10 @@ export function App() {
       peakRef.current = 0;
       let n = nv * STEPS_PER_FRAME;
       while (n-- > 0) simRef.current.step();
+      // откатываем записи, начавшиеся позже нового момента времени
+      const tNow = simRef.current.t;
+      setRecords((rs) => rs.filter((r) => r.t0 <= tNow));
+      inRogueRef.current = simRef.current.maxAmp() / A0 >= live.current.thr;
       sync();
       redraw();
       return nv;
@@ -181,6 +219,17 @@ export function App() {
               <div className={cls(rogueEver)}><span>M = AI (макс.)</span><span className="val">{f(aiMax, 3)}</span></div>
             </div>
             <div className={'status' + cls(rogue)}>{rogue ? 'волна-убийца' : 'норма'}</div>
+            <h2 style={{ marginTop: 14 }}>Зафиксированные волны-убийцы</h2>
+            {records.length === 0
+              ? <div className="note">пока не зафиксировано</div>
+              : <ol className="records">
+                  {records.map((r, i) => (
+                    <li key={r.id} className="rogue">
+                      <span>#{i + 1} · t = {f(r.t, 2)}</span>
+                      <span>H_max = {f(r.hmax, 3)} · AI = {f(r.ai, 3)}</span>
+                    </li>
+                  ))}
+                </ol>}
           </section>
         </div>
         <div className="col">
