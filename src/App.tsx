@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Tex } from './Tex';
 import { draw } from './render';
-import { bfLambda2, initPerturbed, type Sim } from './simulation';
+import { bfLambda2, domainLength, initPerturbed, type Sim } from './simulation';
+import { fmtTime, scales } from './physical';
 
-type HL = 'A0' | 'eps' | 'k' | 'thr' | null;
+type HL = 'A0' | 'Tp' | 'eps' | 'k' | 'thr' | null;
 
 interface Metrics { t: number; hmax: number; peak: number; }
 
@@ -17,18 +18,21 @@ const STEPS_PER_FRAME = 8;
 interface ParamProps {
   id: Exclude<HL, null>;
   label: string; unit?: string; min: number; max: number; step: number; value: number;
+  /** множитель отображения: в поле показывается value·scale (слайдер остаётся во внутренних единицах) */
+  scale?: number;
   onChange: (v: number) => void; hl: HL;
 }
 
-function Param({ id, label, unit, min, max, step, value, onChange, hl }: ParamProps) {
+function Param({ id, label, unit, min, max, step, value, scale = 1, onChange, hl }: ParamProps) {
   return (
     <div className={'param' + (hl === id ? ' hl' : '')}>
       <label><span>{label}{unit && <span className="unit">, {unit}</span>}</span></label>
       <div className="ctl">
         <input type="range" min={min} max={max} step={step} value={value}
           onChange={(e) => onChange(parseFloat(e.target.value))} />
-        <input type="number" min={min} max={max} step={step} value={value}
-          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(v); }} />
+        <input type="number" min={min * scale} max={max * scale} step={step * scale}
+          value={Number((value * scale).toPrecision(4))}
+          onChange={(e) => { const v = parseFloat(e.target.value); if (!isNaN(v)) onChange(v / scale); }} />
       </div>
     </div>
   );
@@ -44,13 +48,15 @@ const LEGEND: LegendItem[] = [
   { sym: '|\\psi|^2\\psi', text: 'нелинейный член: собственная интенсивность волны влияет на её же эволюцию — источник самофокусировки и роста аномальных пиков.' },
   { sym: 'x', text: 'координата вдоль направления распространения волн.' },
   { sym: 't', text: 'время.' },
-  { sym: 'A_0', text: 'амплитуда фонового (невозмущённого) волнения.', hl: 'A0' },
+  { sym: 'A_0', text: 'амплитуда фонового волнения. В безразмерных переменных A₀ = 1; физическая амплитуда a₀ задаётся в параметрах.', hl: 'A0' },
   { sym: '\\varepsilon', text: 'относительная амплитуда начального малого возмущения.', hl: 'eps' },
   { sym: 'k', text: 'волновое число возмущения; растёт только при 0 < k < 2·A₀ (неустойчивость Бенджамина—Фейра).', hl: 'k' },
 ];
 
 export function App() {
-  const [A0, setA0] = useState(1);
+  const A0 = 1; // безразмерная амплитуда фона; физический масштаб — a0, Tp
+  const [a0, setA0] = useState(1.5);
+  const [Tp, setTp] = useState(10);
   const [eps, setEps] = useState(0.05);
   const [k, setK] = useState(1);
   const [thr, setThr] = useState(2.0);
@@ -67,14 +73,15 @@ export function App() {
   const accRef = useRef(0);
   const inRogueRef = useRef(false);
   const recIdRef = useRef(0);
-  const live = useRef({ A0, thr, speed });
-  live.current = { A0, thr, speed };
+  const sc = useMemo(() => scales(a0, Tp), [a0, Tp]);
+  const live = useRef({ A0, thr, speed, sc, a0 });
+  live.current = { A0, thr, speed, sc, a0 };
 
   const redraw = useCallback(() => {
     const c = canvasRef.current, sim = simRef.current;
     if (!c || !sim) return;
     const { A0, thr } = live.current;
-    draw(c, sim, { Hs: A0, threshold: thr, viewHalf: null });
+    draw(c, sim, { Hs: A0, threshold: thr, viewHalf: null, xScale: live.current.sc.L, hScale: 2 * live.current.a0 });
   }, []);
 
   const sync = useCallback(() => {
@@ -124,6 +131,7 @@ export function App() {
     if (simRef.current) sync();
     redraw();
   }, [thr, sync, redraw]);
+  useEffect(() => { redraw(); }, [sc, redraw]);
   useEffect(() => {
     const onResize = () => redraw();
     window.addEventListener('resize', onResize);
@@ -184,6 +192,7 @@ export function App() {
   const rogueEver = aiMax >= thr;
   const kOut = !(k > 0 && k < 2 * A0);
   const lam2 = bfLambda2(k, A0);
+  const hM = (a: number) => 2 * a0 * a; // высота волны = 2·амплитуда, м
   const cls = (v: boolean) => (v ? ' rogue' : '');
 
   const nse = 'i\\,\\psi_t + \\tfrac{1}{2}\\,\\psi_{xx} + |\\psi|^2\\,\\psi = 0';
@@ -195,26 +204,32 @@ export function App() {
     <div className="app">
       <header>
         <h1>Калькулятор волн-убийц</h1>
-        <span className="note">кадр {frame} · t = {f(m.t, 2)} с</span>
+        <span className="note">кадр {frame} · t = {fmtTime(m.t * sc.T)}</span>
       </header>
       <div className="grid">
         <div className="col">
           <section>
             <h2>Параметры</h2>
-            <Param id="A0" label="A0 — фон" unit="м" min={0.5} max={2} step={0.05} value={A0} onChange={setA0} hl={hl} />
-            <Param id="eps" label="ε — возмущение" unit="доля от A0" min={0.01} max={0.2} step={0.005} value={eps} onChange={setEps} hl={hl} />
-            <Param id="k" label="k — волновое число" unit="рад/м" min={0.1} max={2} step={0.05} value={k} onChange={setK} hl={hl} />
+            <Param id="A0" label="a₀ — амплитуда фона" unit="м" min={0.5} max={5} step={0.1} value={a0} onChange={setA0} hl={hl} />
+            <Param id="Tp" label="T_p — период несущей волны" unit="с" min={5} max={20} step={0.5} value={Tp} onChange={setTp} hl={hl} />
+            <Param id="eps" label="ε — возмущение" unit="доля от a₀" min={0.01} max={0.2} step={0.005} value={eps} onChange={setEps} hl={hl} />
+            <Param id="k" label="k — волновое число возмущения" unit="рад/м" min={0.1} max={2} step={0.05} value={k} scale={1 / sc.L} onChange={setK} hl={hl} />
             <Param id="thr" label="порог AI" unit="× H_s" min={2} max={2.5} step={0.1} value={thr} onChange={setThr} hl={hl} />
-            {kOut && <div className="warn">k ∉ (0, 2·A₀): возмущение не растёт, волны-убийцы не будет.</div>}
+            {kOut && <div className="warn">k ∉ (0, {f(2 / sc.L, 4)} рад/м): возмущение не растёт, волны-убийцы не будет.</div>}
             {!kOut && <div className="note">λ² = {f(lam2, 3)} — возмущение растёт со временем.</div>}
+            <div className="note">
+              k₀ = {f(sc.k0, 4)} рад/м · λ₀ = {f(sc.lambda0, 0)} м · крутизна k₀a₀ = {f(sc.steepness, 3)}<br />
+              длина модуляции Λ = {f((2 * Math.PI * sc.L) / k, 0)} м · область расчёта {f(domainLength(k) * sc.L, 0)} м<br />
+              масштабы: 1 ед. x = {f(sc.L, 0)} м, 1 ед. t = {f(sc.T, 0)} с
+            </div>
           </section>
           <section>
             <h2>Показатели</h2>
             <div className="metrics">
-              <div><span>H_s (фон), м</span><span className="val">{f(Hs, 3)}</span></div>
+              <div><span>H_s (фон)</span><span className="val">{f(hM(Hs), 2)} м</span></div>
               <div />
-              <div className={cls(rogue)}><span>H_max (сейчас), м</span><span className="val">{f(m.hmax, 3)}</span></div>
-              <div className={cls(rogueEver)}><span>H_max (макс.), м</span><span className="val">{f(m.peak, 3)}</span></div>
+              <div className={cls(rogue)}><span>H_max (сейчас)</span><span className="val">{f(hM(m.hmax), 2)} м</span></div>
+              <div className={cls(rogueEver)}><span>H_max (макс.)</span><span className="val">{f(hM(m.peak), 2)} м</span></div>
               <div className={cls(rogue)}><span>AI (сейчас)</span><span className="val">{f(ai, 3)}</span></div>
               <div className={cls(rogueEver)}><span>M = AI (макс.)</span><span className="val">{f(aiMax, 3)}</span></div>
             </div>
@@ -225,8 +240,8 @@ export function App() {
               : <ol className="records">
                   {records.map((r, i) => (
                     <li key={r.id} className="rogue">
-                      <span>#{i + 1} · t = {f(r.t, 2)} с</span>
-                      <span>H_max = {f(r.hmax, 3)} м · AI = {f(r.ai, 3)}</span>
+                      <span>#{i + 1} · t = {fmtTime(r.t * sc.T)}</span>
+                      <span>H_max = {f(hM(r.hmax), 2)} м · AI = {f(r.ai, 3)}</span>
                     </li>
                   ))}
                 </ol>}

@@ -4,6 +4,10 @@ export interface DrawOpts {
   Hs: number;
   threshold: number;
   viewHalf: number | null;
+  /** метров на единицу безразмерной координаты x */
+  xScale: number;
+  /** метров высоты волны на единицу Hs (безразмерного) */
+  hScale: number;
 }
 
 const INK = '#000';
@@ -23,7 +27,7 @@ export function draw(canvas: HTMLCanvasElement, sim: Sim, o: DrawOpts) {
   g.fillStyle = '#fff';
   g.fillRect(0, 0, cssW, cssH);
 
-  const ml = 44, mr = 12, mt = 12, mb = 26;
+  const ml = 84, mr = 12, mt = 12, mb = 26;
   const pw = cssW - ml - mr, ph = cssH - mt - mb;
   const yMax = 3.4 * o.Hs;
   const yPix = (v: number) => mt + ph - (Math.min(v, yMax) / yMax) * ph;
@@ -47,10 +51,10 @@ export function draw(canvas: HTMLCanvasElement, sim: Sim, o: DrawOpts) {
   g.font = FONT;
   g.textBaseline = 'middle';
   g.textAlign = 'right';
-  g.fillText('AI=' + o.threshold.toFixed(1), ml - 4, yThr);
+  g.fillText('AI=' + o.threshold.toFixed(1) + ' · ' + (o.threshold * o.hScale).toFixed(1) + ' м', ml - 4, yThr);
   for (const m of [0, 1, 2, 3]) {
     if (Math.abs(m - o.threshold) < 0.35) continue;
-    g.fillText(m === 0 ? '0' : m + 'Hs', ml - 4, yPix(m * o.Hs));
+    g.fillText(m === 0 ? '0' : m + 'Hs · ' + (m * o.hScale).toFixed(1) + ' м', ml - 4, yPix(m * o.Hs));
   }
 
   // profile: columns of dots up to |psi|
@@ -74,9 +78,10 @@ export function draw(canvas: HTMLCanvasElement, sim: Sim, o: DrawOpts) {
   g.fillRect(ml, mt + ph + 4, pw, 1);
   g.textBaseline = 'top';
   g.textAlign = 'left';
-  g.fillText('x=' + (-half).toFixed(1), ml, mt + ph + 9);
+  const xm = (v: number) => Math.round(v * o.xScale) + '';
+  g.fillText('x=' + xm(-half) + ' м', ml, mt + ph + 9);
   g.textAlign = 'center';
   g.fillText('0', ml + pw / 2, mt + ph + 9);
   g.textAlign = 'right';
-  g.fillText(half.toFixed(1), ml + pw, mt + ph + 9);
+  g.fillText(xm(half) + ' м', ml + pw, mt + ph + 9);
 }
