@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Tex } from './Tex';
 import { draw } from './render';
-import { bfLambda2, domainLength, initPerturbed, type Sim } from './simulation';
+import type { Sim } from './simulation';
+import { SEA_T_END, SeaWithRogueSim } from './exact';
 import { fmtTime, scales } from './physical';
 
-type HL = 'A0' | 'Tp' | 'eps' | 'k' | 'thr' | null;
+type HL = 'A0' | 'Tp' | 'thr' | null;
 
 interface Metrics { t: number; hmax: number; peak: number; }
 
@@ -14,6 +15,8 @@ interface RogueRecord { id: number; t0: number; t: number; hmax: number; ai: num
 const f = (v: number, d = 2) => v.toFixed(d);
 
 const STEPS_PER_FRAME = 8;
+/** половина показываемой области, безразмерных ед. x (виден фон из нескольких обычных волн) */
+const VIEW_HALF = 20;
 
 interface ParamProps {
   id: Exclude<HL, null>;
@@ -49,16 +52,12 @@ const LEGEND: LegendItem[] = [
   { sym: 'x', text: 'координата вдоль направления распространения волн.' },
   { sym: 't', text: 'время.' },
   { sym: 'A_0', text: 'амплитуда фонового волнения. В безразмерных переменных A₀ = 1; физическая амплитуда a₀ задаётся в параметрах.', hl: 'A0' },
-  { sym: '\\varepsilon', text: 'относительная амплитуда начального малого возмущения.', hl: 'eps' },
-  { sym: 'k', text: 'волновое число возмущения; растёт только при 0 < k < 2·A₀ (неустойчивость Бенджамина—Фейра).', hl: 'k' },
 ];
 
 export function App() {
   const A0 = 1; // безразмерная амплитуда фона; физический масштаб — a0, Tp
   const [a0, setA0] = useState(1.5);
   const [Tp, setTp] = useState(10);
-  const [eps, setEps] = useState(0.05);
-  const [k, setK] = useState(1);
   const [thr, setThr] = useState(2.0);
   const [speed, setSpeed] = useState(1);
   const [playing, setPlaying] = useState(false);
@@ -81,7 +80,7 @@ export function App() {
     const c = canvasRef.current, sim = simRef.current;
     if (!c || !sim) return;
     const { A0, thr } = live.current;
-    draw(c, sim, { Hs: A0, threshold: thr, viewHalf: null, xScale: live.current.sc.L, hScale: 2 * live.current.a0 });
+    draw(c, sim, { Hs: A0, threshold: thr, viewHalf: VIEW_HALF, xScale: live.current.sc.L, hScale: 2 * live.current.a0 });
   }, []);
 
   const sync = useCallback(() => {
@@ -112,7 +111,7 @@ export function App() {
   }, []);
 
   const reset = useCallback(() => {
-    simRef.current = initPerturbed(A0, eps, k);
+    simRef.current = new SeaWithRogueSim(A0);
     peakRef.current = 0;
     accRef.current = 0;
     inRogueRef.current = false;
@@ -121,7 +120,7 @@ export function App() {
     setPlaying(false);
     sync();
     redraw();
-  }, [A0, eps, k, sync, redraw]);
+  }, [A0, sync, redraw]);
 
   useEffect(() => { reset(); }, [reset]);
   useEffect(() => {
@@ -141,22 +140,25 @@ export function App() {
   const advance = useCallback((frames: number) => {
     const sim = simRef.current!;
     let n = frames * STEPS_PER_FRAME;
-    while (n-- > 0) sim.step();
+    // сценарий ограничен: после SEA_T_END модуляционная неустойчивость разрушает картину
+    while (n-- > 0 && sim.t < SEA_T_END / (A0 * A0)) sim.step();
     sync();
     redraw();
+    const ended = sim.t >= SEA_T_END / (A0 * A0);
+    if (ended) setPlaying(false);
+    setFrame(Math.round(sim.t / (STEPS_PER_FRAME * sim.dt)));
   }, [sync, redraw]);
 
   const stepForward = useCallback(() => {
     setPlaying(false);
     advance(1);
-    setFrame((v) => v + 1);
   }, [advance]);
 
   const stepBack = useCallback(() => {
     setPlaying(false);
     setFrame((v) => {
       const nv = Math.max(0, v - 1);
-      simRef.current = initPerturbed(A0, eps, k);
+      simRef.current = new SeaWithRogueSim(A0);
       peakRef.current = 0;
       let n = nv * STEPS_PER_FRAME;
       while (n-- > 0) simRef.current.step();
@@ -168,7 +170,7 @@ export function App() {
       redraw();
       return nv;
     });
-  }, [A0, eps, k, sync, redraw]);
+  }, [A0, sync, redraw]);
 
   useEffect(() => {
     if (!playing) return;
@@ -178,7 +180,7 @@ export function App() {
       accRef.current += speed;
       const frames = Math.floor(accRef.current);
       accRef.current -= frames;
-      if (frames > 0) { advance(frames); setFrame((v) => v + frames); }
+      if (frames > 0) advance(frames);
       raf = requestAnimationFrame(loop);
     };
     raf = requestAnimationFrame(loop);
@@ -190,14 +192,11 @@ export function App() {
   const aiMax = m.peak / Hs;
   const rogue = ai >= thr;
   const rogueEver = aiMax >= thr;
-  const kOut = !(k > 0 && k < 2 * A0);
-  const lam2 = bfLambda2(k, A0);
-  const hM = (a: number) => 2 * a0 * a; // высота волны = 2·амплитуда, м
+  const hM = (a: number) => 2 * a0 * a; // высота волны = 2·амплитуда огибающей, м
   const cls = (v: boolean) => (v ? ' rogue' : '');
 
   const nse = 'i\\,\\psi_t + \\tfrac{1}{2}\\,\\psi_{xx} + |\\psi|^2\\,\\psi = 0';
-  const ic = `\\psi(x,0) = ${f(A0)}\\,\\bigl(1 + ${f(eps, 3)}\\cos(${f(k)}\\,x)\\bigr)\\,e^{i\\cdot 0}`;
-  const lam = `\\lambda^2 = k^2\\left(A_0^2 - \\tfrac{k^2}{4}\\right) = ${f(lam2, 3)}` + (lam2 > 0 ? `,\\; \\lambda = ${f(Math.sqrt(lam2), 3)}` : '');
+  const ic = `\\psi(x,0) = \\psi_P(x,-t_0) + \\xi(x),\\quad \\psi_P(x,t) = A_0\\,e^{iA_0^2 t}\\left[1 - \\frac{4\\,(1 + 2iA_0^2 t)}{1 + 4A_0^2 x^2 + 4A_0^4 t^2}\\right]`;
   const aiF = `AI = \\frac{H_{max}}{H_s} = \\frac{${f(m.hmax, 3)}}{${f(Hs, 3)}} = ${f(ai, 3)}\\;${rogue ? '\\ge' : '<'}\\; ${f(thr, 1)}`;
 
   return (
@@ -212,14 +211,9 @@ export function App() {
             <h2>Параметры</h2>
             <Param id="A0" label="a₀ — амплитуда фона" unit="м" min={0.5} max={5} step={0.1} value={a0} onChange={setA0} hl={hl} />
             <Param id="Tp" label="T_p — период несущей волны" unit="с" min={5} max={20} step={0.5} value={Tp} onChange={setTp} hl={hl} />
-            <Param id="eps" label="ε — возмущение" unit="доля от a₀" min={0.01} max={0.2} step={0.005} value={eps} onChange={setEps} hl={hl} />
-            <Param id="k" label="k — волновое число возмущения" unit="рад/м" min={0.1} max={2} step={0.05} value={k} scale={1 / sc.L} onChange={setK} hl={hl} />
             <Param id="thr" label="порог AI" unit="× H_s" min={2} max={2.5} step={0.1} value={thr} onChange={setThr} hl={hl} />
-            {kOut && <div className="warn">k ∉ (0, {f(2 / sc.L, 4)} рад/м): возмущение не растёт, волны-убийцы не будет.</div>}
-            {!kOut && <div className="note">λ² = {f(lam2, 3)} — возмущение растёт со временем.</div>}
             <div className="note">
               k₀ = {f(sc.k0, 4)} рад/м · λ₀ = {f(sc.lambda0, 0)} м · крутизна k₀a₀ = {f(sc.steepness, 3)}<br />
-              длина модуляции Λ = {f((2 * Math.PI * sc.L) / k, 0)} м · область расчёта {f(domainLength(k) * sc.L, 0)} м<br />
               масштабы: 1 ед. x = {f(sc.L, 0)} м, 1 ед. t = {f(sc.T, 0)} с
             </div>
           </section>
@@ -274,7 +268,6 @@ export function App() {
             <div className="formula">
               <Tex src={nse} block />
               <Tex src={ic} block />
-              <Tex src={lam} block />
               <Tex src={aiF} block />
             </div>
             <ul className="legend">
@@ -287,9 +280,22 @@ export function App() {
               ))}
               <li className="link" onMouseEnter={() => setHl('thr')} onMouseLeave={() => setHl(null)} onClick={() => setHl('thr')}>
                 <span className="sym"><Tex src="AI" /></span>
-                <span>индекс усиления: H_max — максимум |ψ| по x в кадре, H_s = A₀ — фоновая высота. AI ≥ порога — волна-убийца.</span>
+                <span>индекс усиления: H_max — максимум |ψ| по x в кадре, H_s = 2a₀ — высота фоновой несущей волны. AI ≥ порога — волна-убийца.</span>
               </li>
             </ul>
+            <div className="note" style={{ marginTop: 10 }}>
+              Упрощение: H_s здесь — высота детерминированной фоновой волны (2a₀), а не статистическая H_s = 4σ
+              реального спектра. Для узкополосного волнения различие мало; для широкого спектра AI по этой модели
+              нельзя сравнивать с полевыми данными.
+              Фон — плоская волна A₀ с малыми случайными волнами ξ разной высоты (фиксированное зерно, поэтому сброс
+              и «назад» повторяют один и тот же сценарий). Они взяты в устойчивой полосе k &gt; 2A₀, поэтому сами не
+              вырастают в волны-убийцы. Зародыш Перегрина (1983) в центре за время t₀ = 3/A₀² вырастает в единственную
+              волну-убийцу (AI ≈ 3). Расчёт останавливается при t = {SEA_T_END}/A₀²: дальше численная схема запускает
+              модуляционную неустойчивость, и фон превращается в хаос со случайными пиками, не относящимися к сценарию.
+              Чистое решение Перегрина на ровном фоне — предел бризера Ахмедиева при бесконечном периоде: один пик,
+              по бокам при t = 0 нули амплитуды (x = ±√3/(2A₀)), возврат к фону степенной (~1/t²), побочных пиков нет;
+              вторичные пики дают решения высших порядков (до 5·A₀) и столкновения бризеров.
+            </div>
           </section>
         </div>
       </div>

@@ -79,10 +79,17 @@ export function domainLength(k: number, target = 40): number {
   return (2 * Math.PI * m) / k;
 }
 
-export function initPerturbed(A0: number, eps: number, k: number): Sim {
+/**
+ * Фон A0 + возмущение cos(kx). При localized=true возмущение умножается на гауссово окно (σ = π/2k)
+ * в центре области: растёт одна волна-убийца, остальная область остаётся фоновым волнением.
+ */
+export function initPerturbed(A0: number, eps: number, k: number, localized = true): Sim {
   const sim = new Sim(N_GRID, domainLength(k), DT);
+  const sigma = Math.PI / (2 * k);
   for (let j = 0; j < sim.N; j++) {
-    sim.re[j] = A0 * (1 + eps * Math.cos(k * sim.x(j)));
+    const x = sim.x(j);
+    const w = localized ? Math.exp(-(x * x) / (2 * sigma * sigma)) : 1;
+    sim.re[j] = A0 * (1 + eps * w * Math.cos(k * x));
     sim.im[j] = 0;
   }
   return sim;

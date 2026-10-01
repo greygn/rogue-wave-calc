@@ -13,6 +13,15 @@ export interface DrawOpts {
 const INK = '#000';
 const GRID = '#c8c8c8';
 const RED = '#e00000';
+/** пик солитона Пэрегрина — 3·Hs; ось берём с запасом */
+const PEAK = 3.2;
+
+/** шаг делений оси Y, м: «красивое» число, чтобы подписей было ~5–8 */
+function niceStep(range: number) {
+  const raw = range / 6, pow = Math.pow(10, Math.floor(Math.log10(raw)));
+  const f = raw / pow;
+  return (f < 1.5 ? 1 : f < 3.5 ? 2 : f < 7.5 ? 5 : 10) * pow;
+}
 const FONT = '11px ui-monospace, Menlo, Consolas, monospace';
 
 export function draw(canvas: HTMLCanvasElement, sim: Sim, o: DrawOpts) {
@@ -29,7 +38,12 @@ export function draw(canvas: HTMLCanvasElement, sim: Sim, o: DrawOpts) {
 
   const ml = 84, mr = 12, mt = 12, mb = 26;
   const pw = cssW - ml - mr, ph = cssH - mt - mb;
-  const yMax = 3.4 * o.Hs;
+  // ось Y зависит только от входных параметров (a0, порог), в ходе симуляции не меняется;
+  // верх округлён вверх до круглого числа метров, поэтому при смене a0 фон меняет высоту
+  const need = Math.max(PEAK, o.threshold * 1.1) * o.hScale;
+  const tick = niceStep(need);
+  const yMaxM = Math.ceil(need / tick - 1e-9) * tick;
+  const yMax = yMaxM / o.hScale;
   const yPix = (v: number) => mt + ph - (Math.min(v, yMax) / yMax) * ph;
   const cell = 6;
 
@@ -52,10 +66,16 @@ export function draw(canvas: HTMLCanvasElement, sim: Sim, o: DrawOpts) {
   g.textBaseline = 'middle';
   g.textAlign = 'right';
   g.fillText('AI=' + o.threshold.toFixed(1) + ' · ' + (o.threshold * o.hScale).toFixed(1) + ' м', ml - 4, yThr);
-  for (const m of [0, 1, 2, 3]) {
-    if (Math.abs(m - o.threshold) < 0.35) continue;
-    g.fillText(m === 0 ? '0' : m + 'Hs · ' + (m * o.hScale).toFixed(1) + ' м', ml - 4, yPix(m * o.Hs));
-  }
+  const labelled = [yThr];
+  const label = (v: number, text: string) => {
+    const y = yPix(v);
+    if (labelled.some((l) => Math.abs(l - y) < 12)) return;
+    labelled.push(y);
+    g.fillText(text, ml - 4, y);
+  };
+  label(o.Hs, 'Hs · ' + o.hScale.toFixed(1) + ' м');
+  label(0, '0');
+  for (let m = tick; m < yMaxM - 1e-9; m += tick) label(m / o.hScale, +m.toFixed(2) + ' м');
 
   // profile: columns of dots up to |psi|
   for (let c = 0; c < cols; c++) {
