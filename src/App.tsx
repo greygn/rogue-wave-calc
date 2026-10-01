@@ -16,14 +16,14 @@ const STEPS_PER_FRAME = 8;
 
 interface ParamProps {
   id: Exclude<HL, null>;
-  label: string; min: number; max: number; step: number; value: number;
+  label: string; unit?: string; min: number; max: number; step: number; value: number;
   onChange: (v: number) => void; hl: HL;
 }
 
-function Param({ id, label, min, max, step, value, onChange, hl }: ParamProps) {
+function Param({ id, label, unit, min, max, step, value, onChange, hl }: ParamProps) {
   return (
     <div className={'param' + (hl === id ? ' hl' : '')}>
-      <label><span>{label}</span></label>
+      <label><span>{label}{unit && <span className="unit">, {unit}</span>}</span></label>
       <div className="ctl">
         <input type="range" min={min} max={max} step={step} value={value}
           onChange={(e) => onChange(parseFloat(e.target.value))} />
@@ -195,26 +195,26 @@ export function App() {
     <div className="app">
       <header>
         <h1>Калькулятор волн-убийц</h1>
-        <span className="note">кадр {frame} · t = {f(m.t, 2)}</span>
+        <span className="note">кадр {frame} · t = {f(m.t, 2)} с</span>
       </header>
       <div className="grid">
         <div className="col">
           <section>
             <h2>Параметры</h2>
-            <Param id="A0" label="A0 — фон" min={0.5} max={2} step={0.05} value={A0} onChange={setA0} hl={hl} />
-            <Param id="eps" label="ε — возмущение" min={0.01} max={0.2} step={0.005} value={eps} onChange={setEps} hl={hl} />
-            <Param id="k" label="k — волновое число" min={0.1} max={2} step={0.05} value={k} onChange={setK} hl={hl} />
-            <Param id="thr" label="порог AI" min={2} max={2.5} step={0.1} value={thr} onChange={setThr} hl={hl} />
+            <Param id="A0" label="A0 — фон" unit="м" min={0.5} max={2} step={0.05} value={A0} onChange={setA0} hl={hl} />
+            <Param id="eps" label="ε — возмущение" unit="доля от A0" min={0.01} max={0.2} step={0.005} value={eps} onChange={setEps} hl={hl} />
+            <Param id="k" label="k — волновое число" unit="рад/м" min={0.1} max={2} step={0.05} value={k} onChange={setK} hl={hl} />
+            <Param id="thr" label="порог AI" unit="× H_s" min={2} max={2.5} step={0.1} value={thr} onChange={setThr} hl={hl} />
             {kOut && <div className="warn">k ∉ (0, 2·A₀): возмущение не растёт, волны-убийцы не будет.</div>}
             {!kOut && <div className="note">λ² = {f(lam2, 3)} — возмущение растёт со временем.</div>}
           </section>
           <section>
             <h2>Показатели</h2>
             <div className="metrics">
-              <div><span>H_s (фон)</span><span className="val">{f(Hs, 3)}</span></div>
+              <div><span>H_s (фон), м</span><span className="val">{f(Hs, 3)}</span></div>
               <div />
-              <div className={cls(rogue)}><span>H_max (сейчас)</span><span className="val">{f(m.hmax, 3)}</span></div>
-              <div className={cls(rogueEver)}><span>H_max (макс.)</span><span className="val">{f(m.peak, 3)}</span></div>
+              <div className={cls(rogue)}><span>H_max (сейчас), м</span><span className="val">{f(m.hmax, 3)}</span></div>
+              <div className={cls(rogueEver)}><span>H_max (макс.), м</span><span className="val">{f(m.peak, 3)}</span></div>
               <div className={cls(rogue)}><span>AI (сейчас)</span><span className="val">{f(ai, 3)}</span></div>
               <div className={cls(rogueEver)}><span>M = AI (макс.)</span><span className="val">{f(aiMax, 3)}</span></div>
             </div>
@@ -225,8 +225,8 @@ export function App() {
               : <ol className="records">
                   {records.map((r, i) => (
                     <li key={r.id} className="rogue">
-                      <span>#{i + 1} · t = {f(r.t, 2)}</span>
-                      <span>H_max = {f(r.hmax, 3)} · AI = {f(r.ai, 3)}</span>
+                      <span>#{i + 1} · t = {f(r.t, 2)} с</span>
+                      <span>H_max = {f(r.hmax, 3)} м · AI = {f(r.ai, 3)}</span>
                     </li>
                   ))}
                 </ol>}
