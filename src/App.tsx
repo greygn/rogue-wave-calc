@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Tex } from './Tex';
-import { draw } from './render';
-import type { Sim } from './simulation';
-import { SEA_T_END, SeaWithRogueSim } from './exact';
+import { Scene3D, webglAvailable, type SceneInfo, type Viewer } from './scene3d';
+import { SceneFallback } from './sceneFallback';
+import { SEA2D_DT, SEA2D_T_END, Sea2D, type Sim2D } from './sim2d';
 import { fmtTime, scales } from './physical';
 
 type HL = 'A0' | 'Tp' | 'thr' | null;
@@ -14,9 +14,11 @@ interface RogueRecord { id: number; t0: number; t: number; hmax: number; ai: num
 
 const f = (v: number, d = 2) => v.toFixed(d);
 
-const STEPS_PER_FRAME = 8;
-/** половина показываемой области, безразмерных ед. x (виден фон из нескольких обычных волн) */
-const VIEW_HALF = 20;
+/** шаг по безразмерному времени между кадрами */
+const FRAME_DT = 0.032;
+const STEPS_PER_FRAME = Math.round(FRAME_DT / SEA2D_DT);
+/** каждый KEY-й кадр сохраняем состояние, чтобы «Назад» не пересчитывал всё с нуля */
+const KEY = 8;
 
 interface ParamProps {
   id: Exclude<HL, null>;
@@ -50,6 +52,8 @@ const LEGEND: LegendItem[] = [
   { sym: '\\psi_{xx}', text: 'вторая производная по x: кривизна огибающей, отвечает за дисперсионное расплывание пакета.' },
   { sym: '|\\psi|^2\\psi', text: 'нелинейный член: собственная интенсивность волны влияет на её же эволюцию — источник самофокусировки и роста аномальных пиков.' },
   { sym: 'x', text: 'координата вдоль направления распространения волн.' },
+  { sym: 'y', text: 'поперечная координата (вдоль гребня). Дисперсия по y имеет противоположный знак и вдвое больший коэффициент: уравнение гиперболическое.' },
+  { sym: '\\eta', text: 'возвышение поверхности воды — то, что показано в 3D: несущая волна под огибающей плюс стоксова поправка второго порядка (острые гребни).' },
   { sym: 't', text: 'время.' },
   { sym: 'A_0', text: 'амплитуда фонового волнения. В безразмерных переменных A₀ = 1; физическая амплитуда a₀ задаётся в параметрах.', hl: 'A0' },
 ];
@@ -67,26 +71,34 @@ export function App() {
   const [records, setRecords] = useState<RogueRecord[]>([]);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const simRef = useRef<Sim | null>(null);
+  const sceneRef = useRef<Viewer | null>(null);
+  const simRef = useRef<Sim2D | null>(null);
+  const keysRef = useRef<Map<number, ReturnType<Sim2D['snapshot']>>>(new Map());
+  const frameRef = useRef(0);
+  /** накопленный максимум |ψ| на каждом кадре: нужен, чтобы «Назад» восстанавливал пик */
+  const peaksRef = useRef<number[]>([]);
   const peakRef = useRef(0);
   const accRef = useRef(0);
   const inRogueRef = useRef(false);
   const recIdRef = useRef(0);
   const sc = useMemo(() => scales(a0, Tp), [a0, Tp]);
-  const live = useRef({ A0, thr, speed, sc, a0 });
-  live.current = { A0, thr, speed, sc, a0 };
+  const live = useRef({ A0, thr, speed, sc, a0, Tp });
+  live.current = { A0, thr, speed, sc, a0, Tp };
+  const [info, setInfo] = useState<SceneInfo | null>(null);
 
   const redraw = useCallback(() => {
-    const c = canvasRef.current, sim = simRef.current;
-    if (!c || !sim) return;
-    const { A0, thr } = live.current;
-    draw(c, sim, { Hs: A0, threshold: thr, viewHalf: VIEW_HALF, xScale: live.current.sc.L, hScale: 2 * live.current.a0 });
+    const scene = sceneRef.current, sim = simRef.current;
+    if (!scene || !sim) return;
+    const { thr, a0, Tp } = live.current;
+    scene.update(sim, { a0, Tp, threshold: thr, frame: frameRef.current });
+    setInfo(scene.info);
   }, []);
 
   const sync = useCallback(() => {
     const sim = simRef.current!;
     const hmax = sim.maxAmp();
     peakRef.current = Math.max(peakRef.current, hmax);
+    peaksRef.current[frameRef.current] = peakRef.current;
     setM({ t: sim.t, hmax, peak: peakRef.current });
 
     const { A0, thr } = live.current;
@@ -111,7 +123,15 @@ export function App() {
   }, []);
 
   const reset = useCallback(() => {
-    simRef.current = new SeaWithRogueSim(A0);
+    // начальное поле считается один раз и дальше берётся из сохранённого кадра 0
+    if (!simRef.current) {
+      simRef.current = new Sea2D();
+      keysRef.current.set(0, simRef.current.snapshot());
+    } else {
+      simRef.current.restore(keysRef.current.get(0)!);
+    }
+    frameRef.current = 0;
+    peaksRef.current = [];
     peakRef.current = 0;
     accRef.current = 0;
     inRogueRef.current = false;
@@ -120,9 +140,18 @@ export function App() {
     setPlaying(false);
     sync();
     redraw();
-  }, [A0, sync, redraw]);
+  }, [sync, redraw]);
 
-  useEffect(() => { reset(); }, [reset]);
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    // без WebGL (отключено ускорение, Simple Browser в VS Code) — запасной режим на canvas 2D
+    let scene: Viewer;
+    try { scene = webglAvailable() ? new Scene3D(canvas) : new SceneFallback(canvas); }
+    catch { scene = new SceneFallback(canvas); }
+    sceneRef.current = scene;
+    reset();
+    return () => { scene.dispose(); sceneRef.current = null; };
+  }, [reset]);
   useEffect(() => {
     // записи зависят от порога — при его смене сбрасываем и пересчитываем текущий кадр
     inRogueRef.current = false;
@@ -131,22 +160,22 @@ export function App() {
     redraw();
   }, [thr, sync, redraw]);
   useEffect(() => { redraw(); }, [sc, redraw]);
-  useEffect(() => {
-    const onResize = () => redraw();
-    window.addEventListener('resize', onResize);
-    return () => window.removeEventListener('resize', onResize);
-  }, [redraw]);
 
   const advance = useCallback((frames: number) => {
     const sim = simRef.current!;
-    let n = frames * STEPS_PER_FRAME;
-    // сценарий ограничен: после SEA_T_END модуляционная неустойчивость разрушает картину
-    while (n-- > 0 && sim.t < SEA_T_END / (A0 * A0)) sim.step();
+    const tEnd = SEA2D_T_END / (A0 * A0);
+    // сценарий ограничен: позже модуляционная неустойчивость разрушает картину
+    for (let k = 0; k < frames && sim.t < tEnd - 1e-9; k++) {
+      for (let n = 0; n < STEPS_PER_FRAME; n++) sim.step();
+      frameRef.current++;
+      if (frameRef.current % KEY === 0 && !keysRef.current.has(frameRef.current)) {
+        keysRef.current.set(frameRef.current, sim.snapshot());
+      }
+    }
     sync();
     redraw();
-    const ended = sim.t >= SEA_T_END / (A0 * A0);
-    if (ended) setPlaying(false);
-    setFrame(Math.round(sim.t / (STEPS_PER_FRAME * sim.dt)));
+    if (sim.t >= tEnd - 1e-9) setPlaying(false);
+    setFrame(frameRef.current);
   }, [sync, redraw]);
 
   const stepForward = useCallback(() => {
@@ -156,21 +185,22 @@ export function App() {
 
   const stepBack = useCallback(() => {
     setPlaying(false);
-    setFrame((v) => {
-      const nv = Math.max(0, v - 1);
-      simRef.current = new SeaWithRogueSim(A0);
-      peakRef.current = 0;
-      let n = nv * STEPS_PER_FRAME;
-      while (n-- > 0) simRef.current.step();
-      // откатываем записи, начавшиеся позже нового момента времени
-      const tNow = simRef.current.t;
-      setRecords((rs) => rs.filter((r) => r.t0 <= tNow));
-      inRogueRef.current = simRef.current.maxAmp() / A0 >= live.current.thr;
-      sync();
-      redraw();
-      return nv;
-    });
-  }, [A0, sync, redraw]);
+    const sim = simRef.current!;
+    const target = Math.max(0, frameRef.current - 1);
+    const base = Math.floor(target / KEY) * KEY;
+    sim.restore(keysRef.current.get(base)!);
+    for (let k = base; k < target; k++) for (let n = 0; n < STEPS_PER_FRAME; n++) sim.step();
+    frameRef.current = target;
+    // пик за прошедшее время и записи пересчитываем по сохранённым кадрам
+    const tNow = sim.t;
+    setRecords((rs) => rs.filter((r) => r.t0 <= tNow));
+    peaksRef.current.length = target;
+    peakRef.current = peaksRef.current[target - 1] ?? 0;
+    inRogueRef.current = sim.maxAmp() / A0 >= live.current.thr;
+    sync();
+    redraw();
+    setFrame(target);
+  }, [sync, redraw]);
 
   useEffect(() => {
     if (!playing) return;
@@ -195,8 +225,9 @@ export function App() {
   const hM = (a: number) => 2 * a0 * a; // высота волны = 2·амплитуда огибающей, м
   const cls = (v: boolean) => (v ? ' rogue' : '');
 
-  const nse = 'i\\,\\psi_t + \\tfrac{1}{2}\\,\\psi_{xx} + |\\psi|^2\\,\\psi = 0';
-  const ic = `\\psi(x,0) = \\psi_P(x,-t_0) + \\xi(x),\\quad \\psi_P(x,t) = A_0\\,e^{iA_0^2 t}\\left[1 - \\frac{4\\,(1 + 2iA_0^2 t)}{1 + 4A_0^2 x^2 + 4A_0^4 t^2}\\right]`;
+  const nse = 'i\\,\\psi_t + \\tfrac{1}{2}\\,\\psi_{xx} - \\psi_{yy} + |\\psi|^2\\,\\psi = 0';
+  const eta = '\\eta = \\mathrm{Re}\\bigl[A\\,e^{i\\theta}\\bigr] + \\mathrm{Re}\\bigl[\\tfrac{1}{2}k_0A^2\\,e^{2i\\theta}\\bigr],\\; A = a_0\\psi,\\; \\theta = k_0x - \\omega_0 t';
+  const ic = `\\psi(x,y,0) = e^{-it_0} + \\bigl[\\psi_P(x,-t_0) - e^{-it_0}\\bigr]e^{-y^2/2W^2} + \\xi(x,y),\\quad \\psi_P(x,t) = A_0\\,e^{iA_0^2 t}\\left[1 - \\frac{4\\,(1 + 2iA_0^2 t)}{1 + 4A_0^2 x^2 + 4A_0^4 t^2}\\right]`;
   const aiF = `AI = \\frac{H_{max}}{H_s} = \\frac{${f(m.hmax, 3)}}{${f(Hs, 3)}} = ${f(ai, 3)}\\;${rogue ? '\\ge' : '<'}\\; ${f(thr, 1)}`;
 
   return (
@@ -243,7 +274,7 @@ export function App() {
         </div>
         <div className="col">
           <section>
-            <h2>|ψ(x,t)|</h2>
+            <h2>Поверхность воды η(x, y, t)</h2>
             <canvas ref={canvasRef} />
             <div className="row controls" style={{ marginTop: 10 }}>
               <button className="btn-icon" onClick={reset} title="Сброс">
@@ -268,6 +299,7 @@ export function App() {
             <div className="formula">
               <Tex src={nse} block />
               <Tex src={ic} block />
+              <Tex src={eta} block />
               <Tex src={aiF} block />
             </div>
             <ul className="legend">
@@ -280,21 +312,34 @@ export function App() {
               ))}
               <li className="link" onMouseEnter={() => setHl('thr')} onMouseLeave={() => setHl(null)} onClick={() => setHl('thr')}>
                 <span className="sym"><Tex src="AI" /></span>
-                <span>индекс усиления: H_max — максимум |ψ| по x в кадре, H_s = 2a₀ — высота фоновой несущей волны. AI ≥ порога — волна-убийца.</span>
+                <span>индекс усиления: H_max — максимум |ψ| по x и y в кадре, H_s = 2a₀ — высота фоновой несущей волны. AI ≥ порога — волна-убийца.</span>
               </li>
             </ul>
             <div className="note" style={{ marginTop: 10 }}>
-              Упрощение: H_s здесь — высота детерминированной фоновой волны (2a₀), а не статистическая H_s = 4σ
-              реального спектра. Для узкополосного волнения различие мало; для широкого спектра AI по этой модели
-              нельзя сравнивать с полевыми данными.
-              Фон — плоская волна A₀ с малыми случайными волнами ξ разной высоты (фиксированное зерно, поэтому сброс
-              и «назад» повторяют один и тот же сценарий). Они взяты в устойчивой полосе k &gt; 2A₀, поэтому сами не
-              вырастают в волны-убийцы. Зародыш Перегрина (1983) в центре за время t₀ = 3/A₀² вырастает в единственную
-              волну-убийцу (AI ≈ 3). Расчёт останавливается при t = {SEA_T_END}/A₀²: дальше численная схема запускает
-              модуляционную неустойчивость, и фон превращается в хаос со случайными пиками, не относящимися к сценарию.
-              Чистое решение Перегрина на ровном фоне — предел бризера Ахмедиева при бесконечном периоде: один пик,
-              по бокам при t = 0 нули амплитуды (x = ±√3/(2A₀)), возврат к фону степенной (~1/t²), побочных пиков нет;
-              вторичные пики дают решения высших порядков (до 5·A₀) и столкновения бризеров.
+              Модель: 2D НУШ для глубокой воды (гиперболическое приближение вместо полной системы Дэви—Стюартсона;
+              Eliasson, Shukla 2010). Фон — плоская волна A₀ с малыми случайными волнами ξ в устойчивой области
+              (kₓ²/2 − k_y² вне (0, 2)), которые сами не растут; зерно фиксировано, поэтому сброс и «назад» повторяют
+              один и тот же сценарий. В центре — зародыш Перегрина (1983), ограниченный по y гауссианом шириной W = 6
+              (1 ед. = {f(sc.L, 0)} м). Он вырастает в волну-убийцу (AI ≈ 3), после чего вершина
+              уходит от центра вдоль гребня (порядка 4–6 ед. y на ед. t) и растёт до ≈3,1, а не идёт вместе с остальными
+              волнами: огибающая в системе, движущейся с групповой скоростью, по x неподвижна, а несущие гребни
+              пробегают сквозь неё. Качественно это согласуется с литературой: Перегрин в гиперболическом НУШ
+              неустойчив к поперечным возмущениям, распадается и даёт «x-волну», но без взрыва (Transverse Instability
+              of Rogue Waves, PRL 127, 104101, 2021; arXiv:1911.00918). Эти работы взяты для отношения коэффициентов
+              −1, у нас −2, поэтому скорость расхождения и её зависимость от W в источниках не найдены — это наш
+              результат; он устойчив к шагу, сетке и размеру области. Форма зародыша (гауссиан по y) в литературе
+              не стандартизирована, W = 6 — калибровка. При W → ∞ получается обычный Перегрин без расхождения.
+              AI здесь считается по глобальному максимуму |ψ| на всём поле; в работах по прямому моделированию
+              (Kokorina, Slunyaev) H_s считают по продольным разрезам отдельно, это другое определение.
+              Расчёт останавливается при t = {SEA2D_T_END}/A₀²: позже численная схема запускает модуляционную
+              неустойчивость, и фон разрушается случайными пиками, не относящимися к сценарию.
+              Точного 2D-аналога солитона Перегрина для этого уравнения в литературе не найдено, поэтому поле считается
+              численно (split-step Фурье).
+              Упрощения показа: вертикальный масштаб растянут{info && <> в ×{f(info.exaggeration, 0)} раз</>} и фиксирован
+              по введённым a₀ и порогу (не меняется в ходе симуляции); несущая показана замедленно
+              {info?.carrierClamped && ' и реже реальной (сетка не разрешает настоящую длину волны)'}; в η нет сеттдауна ∝ k₀|A|².
+              H_s здесь — высота детерминированной фоновой волны (2a₀), а не статистическая 4σ реального спектра:
+              для широкого спектра AI по этой модели нельзя сравнивать с полевыми данными.
             </div>
           </section>
         </div>
